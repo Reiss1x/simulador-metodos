@@ -1,0 +1,28 @@
+!PARAMETERS
+# Rede da etapa 2 (tandem) - serve para conferir com o simulador anterior
+
+arrivals:
+   Q1: 2.5
+
+queues:
+   Q1:
+      servers: 2
+      capacity: 3
+      minArrival: 1.0
+      maxArrival: 5.0
+      minService: 4.0
+      maxService: 5.0
+   Q2:
+      servers: 1
+      capacity: 5
+      minService: 1.0
+      maxService: 3.0
+
+network:
+-  source: Q1
+   target: Q2
+   probability: 1.0
+
+rndnumbersPerSeed: 100000
+seeds:
+- 12345
