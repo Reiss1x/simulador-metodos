@@ -96,9 +96,13 @@ Ao final: tempo global da simulação e quantidade de aleatórios usados.
   - `CHEGADA`: cliente de fora chega numa fila; agenda a próxima chegada.
   - `PASSAGEM`: cliente termina o atendimento numa fila e vai para outra.
   - `SAIDA`: cliente termina o atendimento e deixa o sistema.
-- **Roteamento:** ao agendar o fim de um atendimento, sorteia-se (com um
-  aleatório) o destino do cliente conforme as probabilidades da `network`.
-  Se só houver um destino com probabilidade 1, nenhum aleatório é gasto.
+- **Roteamento:** ao agendar o fim de um atendimento, **primeiro** sorteia-se
+  (com um aleatório) o destino do cliente e **depois** o tempo de atendimento.
+  Os destinos são testados em ordem crescente de probabilidade (o que sobrar
+  é saída). Se só houver um destino com probabilidade 1, nenhum aleatório é
+  gasto. Essa é a mesma regra do `simulator.jar` do professor.
+- **Sementes x lista fixa:** se o `.yml` tiver `seeds`, a lista `rndnumbers`
+  é ignorada (igual ao `simulator.jar`).
 - **Perdas:** cliente que chega (de fora ou de outra fila) numa fila cheia é
   perdido e contado nessa fila.
 - **Tempos por estado:** a cada evento, o tempo decorrido é somado ao estado
@@ -109,6 +113,16 @@ Ao final: tempo global da simulação e quantidade de aleatórios usados.
 Rodar `python simulador_rede.py modelo_tandem.yml` reproduz exatamente o
 resultado da etapa 2 (`resultados_tandem.txt`), o que confirma que o simulador
 genérico se comporta igual ao anterior nesse caso.
+
+Comparação com o `simulator.jar` do professor
+(`java -jar simulator.jar run modelo.yml`):
+- com lista fixa (`rndnumbers`), os resultados são **idênticos**;
+- trocando temporariamente o gerador pelo do professor (a = 25214903917,
+  c = 11, M = 2⁴⁸), os resultados com sementes também são idênticos;
+- com o gerador próprio, as probabilidades ficam muito próximas.
+- Atenção: o `simulator.jar` mostra o tempo de cada estado **somado** entre
+  as sementes e as perdas totais; aqui a seção "MÉDIA" divide ambos pelo
+  número de sementes (as probabilidades são as mesmas).
 
 > Os valores dependem da semente e da ordem de uso dos aleatórios; comparados
 > com o simulador do módulo 3, as probabilidades devem ficar próximas, mas não

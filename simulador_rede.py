@@ -1,25 +1,28 @@
 """
-Etapa 3 - Simulador de REDES DE FILAS com topologia genérica
+Simulador de redes de filas (Etapa 3)
 
-Lê o modelo de um arquivo .yml (mesmo estilo do simulador do módulo 3)
-e simula qualquer rede: filas com ou sem chegadas externas, capacidade
-finita ou infinita, roteamento probabilístico (inclusive realimentação)
-e saída do sistema.
+Lê o modelo de um .yml (mesmo formato do simulador do módulo 3) e simula
+uma rede qualquer: filas com ou sem chegada externa, capacidade finita ou
+infinita, roteamento probabilístico (pode ter realimentação) e saída.
 
-Uso:
+Como rodar:
     python simulador_rede.py modelo.yml
     python simulador_rede.py modelo.yml > resultados.txt
 
-Não precisa de bibliotecas externas (o .yml é lido por um parser próprio).
+Não usa biblioteca externa nenhuma, o .yml é lido por um parser simples
+feito aqui mesmo.
 """
 import heapq
 import sys
 
 
-# =========================================================================
-#  LEITOR DE YAML (subconjunto usado pelo simulador do módulo 3)
-# =========================================================================
+# ---------------------------------------------------------------
+# Leitura do .yml
+# Só implementei a parte do YAML que o simulador do módulo 3 usa.
+# ---------------------------------------------------------------
+
 def _escalar(v):
+    # tenta int, depois float; se nenhum der certo, fica como texto
     v = v.strip().strip('"').strip("'")
     for conv in (int, float):
         try:
@@ -30,12 +33,13 @@ def _escalar(v):
 
 
 def ler_yaml(caminho):
+    # guarda cada linha útil como [indentação, texto]
     linhas = []
-    with open(caminho, encoding="utf-8") as f:
-        for bruta in f:
-            txt = bruta.split("#", 1)[0].rstrip().replace("\t", "    ")
+    with open(caminho, encoding="utf-8") as arq:
+        for linha in arq:
+            txt = linha.split("#", 1)[0].rstrip().replace("\t", "    ")
             if not txt.strip() or txt.strip().startswith("!"):
-                continue
+                continue  # linha vazia, comentário ou tag tipo !PARAMETERS
             linhas.append([len(txt) - len(txt.lstrip()), txt.strip()])
 
     def bloco(i, ind):
@@ -48,9 +52,12 @@ def ler_yaml(caminho):
         while i < len(linhas) and linhas[i][0] == ind and linhas[i][1].startswith("-"):
             resto = linhas[i][1][1:]
             conteudo = resto.lstrip()
-            if not conteudo:                         # "-" sozinho na linha
+            if not conteudo:
+                # "-" sozinho: o item vem nas linhas de baixo
                 v, i = bloco(i + 1, linhas[i + 1][0])
             elif ":" in conteudo and not conteudo.endswith("'"):
+                # "- chave: valor" vira um mapa. Reescrevo a linha sem o "-"
+                # pra ela ficar alinhada com as outras chaves do mesmo item.
                 linhas[i] = [ind + 1 + len(resto) - len(conteudo), conteudo]
                 v, i = mapa(i, linhas[i][0])
             else:
@@ -68,6 +75,7 @@ def ler_yaml(caminho):
                 res[chave] = _escalar(valor)
             elif i < len(linhas) and (linhas[i][0] > ind or
                                       (linhas[i][0] == ind and linhas[i][1].startswith("-"))):
+                # chave sem valor na mesma linha: o conteúdo está indentado abaixo
                 res[chave], i = bloco(i, linhas[i][0])
             else:
                 res[chave] = None
@@ -76,21 +84,23 @@ def ler_yaml(caminho):
     return bloco(0, linhas[0][0])[0] if linhas else {}
 
 
-# =========================================================================
-#  GERADOR DE NÚMEROS PSEUDOALEATÓRIOS (Congruente Linear)
-# =========================================================================
+# ---------------------------------------------------------------
+# Gerador de aleatórios (congruente linear)
+# ---------------------------------------------------------------
+
 a = 1664525
 c = 1013904223
 M = 2 ** 32
 previous = 0
-count = 0                 # aleatórios restantes (critério de parada)
-lista_fixa = None         # usada quando o .yml traz "rndnumbers"
+count = 0           # quantos aleatórios ainda podem ser usados (é o critério de parada)
+lista_fixa = None   # preenchida quando o .yml traz "rndnumbers"
 
 
 def NextRandom():
     global previous, count
     count -= 1
     if lista_fixa is not None:
+        # pega os números da lista na ordem em que aparecem
         return lista_fixa[len(lista_fixa) - count - 1]
     previous = (a * previous + c) % M
     return previous / M
@@ -100,23 +110,26 @@ def Uniforme(minimo, maximo):
     return minimo + (maximo - minimo) * NextRandom()
 
 
-# =========================================================================
-#  CLASSES
-# =========================================================================
+# ---------------------------------------------------------------
+# Filas, eventos e escalonador
+# (os nomes dos métodos seguem o pseudocódigo visto em aula)
+# ---------------------------------------------------------------
+
 class Fila:
     def __init__(self, nome, cfg):
         self.nome = nome
         self.server = int(cfg.get("servers", 1))
         cap = cfg.get("capacity")
-        self.capacity = int(cap) if cap not in (None, "", -1) else None  # None = infinita
+        # sem capacity (ou -1) a fila é infinita, e aí guardo None
+        self.capacity = int(cap) if cap not in (None, "", -1) else None
         self.minArrival = cfg.get("minArrival")
         self.maxArrival = cfg.get("maxArrival")
         self.minService = float(cfg["minService"])
         self.maxService = float(cfg["maxService"])
         self.customers = 0
         self.loss = 0
-        self.times = [0.0]
-        self.rotas = []        # lista de (destino ou None=saída, probabilidade)
+        self.times = [0.0]   # tempo acumulado em cada estado (nº de clientes)
+        self.rotas = []      # pares (fila destino, probabilidade); destino None = sai
 
     def Status(self):   return self.customers
     def Capacity(self): return self.capacity
@@ -138,10 +151,13 @@ class Evento:
     def __init__(self, tipo, tempo, origem=None, destino=None):
         self.tipo, self.tempo = tipo, tempo
         self.origem, self.destino = origem, destino
+        # contador pra desempatar eventos no mesmo instante:
+        # quem foi agendado primeiro sai primeiro
         Evento._seq += 1
-        self.seq = Evento._seq             # desempate: ordem de agendamento
+        self.seq = Evento._seq
 
-    def __lt__(self, outro):               # equivalente ao compareTo do Java
+    def __lt__(self, outro):
+        # faz o papel do compareTo da versão em Java
         return (self.tempo, self.seq) < (outro.tempo, outro.seq)
 
 
@@ -159,16 +175,18 @@ class Escalonador:
         return not self.eventos
 
 
-# =========================================================================
-#  ESTADO GLOBAL DA SIMULAÇÃO
-# =========================================================================
+# ---------------------------------------------------------------
+# Estado da simulação
+# ---------------------------------------------------------------
+
 filas = {}
 escalonador = Escalonador()
 TempoGlobal = 0.0
 
 
 def AcumulaTempo(evento):
-    """Soma o tempo decorrido ao estado atual de TODAS as filas."""
+    # antes de tratar qualquer evento, soma o tempo que passou
+    # no estado atual de cada fila da rede
     global TempoGlobal
     delta = evento.tempo - TempoGlobal
     for f in filas.values():
@@ -179,26 +197,29 @@ def AcumulaTempo(evento):
 
 
 def Roteamento(fila):
-    """Sorteia o destino de quem termina o atendimento (None = sai do sistema)."""
+    # decide pra onde vai quem terminou o atendimento (None = sai do sistema)
     if not fila.rotas:
         return None
     if len(fila.rotas) == 1 and fila.rotas[0][1] >= 1.0:
-        return fila.rotas[0][0]            # destino certo: não gasta aleatório
+        return fila.rotas[0][0]  # só tem um caminho, não precisa sortear
     if count <= 0:
-        return None                        # simulação já vai encerrar
-    r, acum = NextRandom(), 0.0
-    for destino, prob in fila.rotas:
-        acum += prob
-        if r < acum:
+        return None  # acabaram os aleatórios, a simulação vai parar mesmo
+    r = NextRandom()
+    for destino, prob in fila.rotas:  # rotas já estão em ordem crescente de prob.
+        if r <= prob:
             return destino
-    return None                            # probabilidade restante = saída
+        r -= prob
+    return None  # caiu na probabilidade que sobrou, então sai do sistema
 
 
 def AgendaFimAtendimento(fila):
     if count <= 0:
         return
-    tempo = TempoGlobal + Uniforme(fila.minService, fila.maxService)
+    # ordem importa: primeiro sorteia o destino, depois o tempo de atendimento
     destino = Roteamento(fila)
+    if count <= 0:
+        return
+    tempo = TempoGlobal + Uniforme(fila.minService, fila.maxService)
     if destino is None:
         escalonador.agenda(Evento(SAIDA, tempo, origem=fila))
     else:
@@ -209,7 +230,7 @@ def EntraNaFila(fila):
     if fila.temEspaco():
         fila.In()
         if fila.Status() <= fila.Servers():
-            AgendaFimAtendimento(fila)
+            AgendaFimAtendimento(fila)  # tem servidor livre, já começa a ser atendido
     else:
         fila.Loss()
 
@@ -219,9 +240,8 @@ def CHEGADA_(evento):
     fila = evento.destino
     EntraNaFila(fila)
     if count > 0:
-        escalonador.agenda(Evento(CHEGADA,
-                                  TempoGlobal + Uniforme(fila.minArrival, fila.maxArrival),
-                                  destino=fila))
+        proxima = TempoGlobal + Uniforme(fila.minArrival, fila.maxArrival)
+        escalonador.agenda(Evento(CHEGADA, proxima, destino=fila))
 
 
 def SAIDA_(evento):
@@ -229,7 +249,7 @@ def SAIDA_(evento):
     fila = evento.origem
     fila.Out()
     if fila.Status() >= fila.Servers():
-        AgendaFimAtendimento(fila)
+        AgendaFimAtendimento(fila)  # tinha gente esperando, chama o próximo
 
 
 def PASSAGEM_(evento):
@@ -241,25 +261,31 @@ def PASSAGEM_(evento):
     EntraNaFila(destino)
 
 
-# =========================================================================
-#  CARGA DO MODELO E EXECUÇÃO
-# =========================================================================
+# ---------------------------------------------------------------
+# Montagem do modelo e laço principal
+# ---------------------------------------------------------------
+
 def carrega_modelo(modelo):
     global TempoGlobal
     filas.clear()
     escalonador.eventos.clear()
     TempoGlobal = 0.0
+
     for nome, cfg in modelo["queues"].items():
         filas[nome] = Fila(nome, cfg or {})
+
     for ligacao in modelo.get("network") or []:
         origem = filas[ligacao["source"]]
-        alvo = ligacao["target"]
-        destino = filas.get(alvo)          # alvo desconhecido = saída do sistema
+        # se o target não for uma fila conhecida, trato como saída do sistema
+        destino = filas.get(ligacao["target"])
         origem.rotas.append((destino, float(ligacao["probability"])))
+
     for nome, f in filas.items():
+        f.rotas.sort(key=lambda r: r[1])  # crescente; empates mantêm a ordem do .yml
         soma = sum(p for _, p in f.rotas)
         if soma > 1.0 + 1e-9:
             sys.exit(f"Erro: probabilidades de roteamento da fila {nome} somam {soma} (> 1).")
+
     for nome, tempo in (modelo.get("arrivals") or {}).items():
         f = filas[nome]
         if f.minArrival is None or f.maxArrival is None:
@@ -270,7 +296,9 @@ def carrega_modelo(modelo):
 def simula(modelo, semente=None, qtd=None):
     global previous, count, lista_fixa
     carrega_modelo(modelo)
-    if "rndnumbers" in modelo:
+
+    if semente is None:
+        # sem semente: usa a lista de aleatórios que veio no .yml
         lista_fixa = [float(x) for x in modelo["rndnumbers"]]
         count = len(lista_fixa)
     else:
@@ -298,10 +326,12 @@ def simula(modelo, semente=None, qtd=None):
     }
 
 
-# =========================================================================
-#  RELATÓRIO
-# =========================================================================
+# ---------------------------------------------------------------
+# Relatório
+# ---------------------------------------------------------------
+
 def fmt(x, casas=4):
+    # formato brasileiro: 1.234,5678
     return f"{x:,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
@@ -310,6 +340,7 @@ def relatorio(res, titulo):
     print("=" * 62)
     print(titulo)
     print("=" * 62)
+
     for nome, f in res["filas"].items():
         cap = "" if f["capacity"] is None else f"/{f['capacity']}"
         cheg = (f", chegadas {f['minArrival']}..{f['maxArrival']}"
@@ -317,30 +348,35 @@ def relatorio(res, titulo):
         print(f"\n*** {nome}: G/G/{f['servers']}{cap}{cheg}, "
               f"atendimento {f['minService']}..{f['maxService']}")
         print(f"{'Estado':>8}  {'Tempo acumulado':>18}  {'Probabilidade':>14}")
+
+        # fila finita mostra todos os estados até a capacidade, mesmo os zerados
         n_estados = len(f["times"]) if f["capacity"] is None else f["capacity"] + 1
         times = f["times"] + [0.0] * (n_estados - len(f["times"]))
         for i in range(n_estados):
             print(f"{i:>8}  {fmt(times[i]):>18}  {fmt(times[i] / T * 100, 2) + '%':>14}")
         print(f"Clientes perdidos: {f['loss']}")
 
-        # Índices de desempenho
-        ms = (f["minService"] + f["maxService"]) / 2
+        # métricas de desempenho
+        media_servico = (f["minService"] + f["maxService"]) / 2
         P = [t / T for t in times]
-        N = sum(i * p for i, p in enumerate(P))
-        ocup = sum(min(i, f["servers"]) * p for i, p in enumerate(P))
-        X = ocup / ms
-        U = ocup / f["servers"]
-        W = N / X if X > 0 else 0.0
+        N = sum(i * p for i, p in enumerate(P))                         # população média
+        ocupados = sum(min(i, f["servers"]) * p for i, p in enumerate(P))  # servidores ocupados em média
+        X = ocupados / media_servico                                    # vazão
+        U = ocupados / f["servers"]                                     # utilização
+        W = N / X if X > 0 else 0.0                                     # tempo de resposta (Little)
         print(f"População média (N): {fmt(N)} | Vazão (X): {fmt(X)} clientes/min | "
               f"Utilização (U): {fmt(U * 100, 2)}% | Tempo de resposta (W): {fmt(W)} min")
+
     print(f"\nTempo global de simulação: {fmt(T)}")
     print(f"Números aleatórios usados: {res['usados']}\n")
 
 
 def media(resultados):
+    # junta as execuções de várias sementes tirando a média de tudo
     base = resultados[0]
     k = len(resultados)
-    m = {"usados": base["usados"], "tempo": sum(r["tempo"] for r in resultados) / k,
+    m = {"usados": base["usados"],
+         "tempo": sum(r["tempo"] for r in resultados) / k,
          "filas": {}}
     for nome, f in base["filas"].items():
         n = max(len(r["filas"][nome]["times"]) for r in resultados)
@@ -356,7 +392,8 @@ def main():
         sys.exit("Uso: python simulador_rede.py modelo.yml")
     modelo = ler_yaml(sys.argv[1])
 
-    if "rndnumbers" in modelo:
+    # .yml com lista de aleatórios e sem sementes: roda uma vez só com a lista
+    if not modelo.get("seeds") and "rndnumbers" in modelo:
         relatorio(simula(modelo), "SIMULAÇÃO (lista fixa de aleatórios do .yml)")
         return
 
@@ -370,6 +407,7 @@ def main():
         r = simula(modelo, s, qtd)
         resultados.append(r)
         relatorio(r, f"SIMULAÇÃO - semente {s} ({qtd} aleatórios)")
+
     if len(resultados) > 1:
         relatorio(media(resultados), f"MÉDIA DAS {len(resultados)} SEMENTES")
 
